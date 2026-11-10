@@ -339,6 +339,31 @@ def hyperflow_blocks(
     return swap_hyperflow_blocks(MiniMaxH3Blocks().get_workflow(workflow), sigmas=sigmas)
 
 
+#: The pipeline's `max_duration` is 15.0 s and is checked against the frame count *after* snapping to `17n + 5`, so a
+#: 15 s request (360 frames) snaps to 362 and is rejected as 15.083 s. 362 frames is a valid grid point the VAE
+#: decodes fine, so the cap is raised to admit it — the same allowance `hyperflow-h3-flash` makes.
+MAX_FRAMES = 362
+FPS = 24
+
+
+def admit_max_frames(pipeline: Any) -> None:
+    """Raise a MiniMax-H3 pipeline's duration cap to [`MAX_FRAMES`] (362 frames, 15.083 s).
+
+    `MiniMaxH3ModularPipeline.max_duration` is a read-only property, so it is overridden on the instance's class —
+    the same technique `hyperflow-h3-flash` uses. Without this a 15 s request fails validation even though 362 frames
+    is on the model's own frame grid.
+    """
+    cls = type(pipeline)
+    if getattr(cls, "_hyperflow_max_frames_admitted", False):
+        return
+    cap = MAX_FRAMES / FPS
+    pipeline.__class__ = type(
+        cls.__name__,
+        (cls,),
+        {"max_duration": property(lambda _self: cap), "_hyperflow_max_frames_admitted": True},
+    )
+
+
 def configure_hyperflow_blocks(blocks: Any, metadata: HyperFlowMetadata) -> int:
     """Point every [`HyperFlowSetTimestepsStep`] under ``blocks`` at the grid and shifts stored in a weights file.
 

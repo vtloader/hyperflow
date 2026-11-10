@@ -329,7 +329,9 @@ def _load_into(
         lora_dropout=0.0,
         bias="none",
         target_modules=sorted(plan),
-        init_lora_weights=True,
+        # Every A/B tensor below is overwritten from the file, so PEFT's kaiming/zeros pass would only burn time: it
+        # runs one RNG fill per target module, 316 of them, measured at 3.4 s on the NPU host.
+        init_lora_weights=False,
     )
     transformer.add_adapter(config, adapter_name=_ADAPTER_NAME)
 
@@ -375,6 +377,35 @@ def _set_hyperflow(target: Any, enabled: bool) -> None:
         embedder.passthrough = not enabled
 
 
+def merge_hyperflow_lora(target: Any) -> int:
+    """Fold every loaded HyperFlow adapter into its base weights, leaving plain `nn.Linear` modules behind.
+
+    Inference-only: the merged weights are mathematically the same model (`y = (W + s·BA)x`), but the adapter can no
+    longer be disabled, unmerged, or scaled. It exists because tensor parallelism cannot shard PEFT-wrapped modules:
+    `apply_tensor_parallel` rejects a model holding adapter layers, and sharding first leaves the full-size LoRA
+    matrices beside a `1/N`-width base weight, which mismatches at the first matmul.
+
+    The two-time embedder is kept: merging rewrites `time_embedder.base`/`time_embedder.endpoint` weights in place,
+    and the wrapper continues to blend them. Returns the number of merged modules.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    merged = 0
+    for transformer in find_transformers(target).values():
+        layers = [module for module in transformer.modules() if isinstance(module, BaseTunerLayer)]
+        for layer in layers:
+            # `safe_merge` refuses to fold a delta that would produce NaN/Inf; a valid checkpoint is unaffected.
+            layer.merge(safe_merge=True)
+        # `merge()` keeps the adapter parameters around for `unmerge()`. Drop the PEFT wrappers entirely so the tree is
+        # plain `nn.Linear` again and `apply_tensor_parallel` accepts it.
+        transformer.unload_lora()
+        merged += len(layers)
+        logger.info("HyperFlow adapter merged into %d module(s) of %s", len(layers), type(transformer).__name__)
+    if not merged:
+        raise ValueError("No HyperFlow adapter found to merge; call `load_hyperflow_lora` first.")
+    return merged
+
+
 def disable_hyperflow(target: Any) -> None:
     """Turn a patched transformer back into the exact base model: LoRA layers off, endpoint ignored.
 
@@ -398,6 +429,7 @@ __all__ = [
     "find_transformers",
     "is_h3_transformer",
     "load_hyperflow_lora",
+    "merge_hyperflow_lora",
     "plan_from_keys",
     "read_metadata",
     "resolve_weights",

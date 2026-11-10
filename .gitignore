@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv312/
 .pytest_cache/
 .ruff_cache/
 
@@ -13,6 +14,11 @@ dist/
 *.mp4
 *.wav
 outputs/
+# Downloaded snapshots (`--local-dir models/...`)
+models/
+
+# WebUI run history (prompts, uploads, logs, mp4)
+webui/runs/
 
 # Editors / OS
 .DS_Store
